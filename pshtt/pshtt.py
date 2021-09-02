@@ -76,7 +76,7 @@ HEADERS = [
     "HSTS Preload Ready", "HSTS Preload Pending", "HSTS Preloaded",
     "Base Domain HSTS Preloaded", "Domain Supports HTTPS",
     "Domain Enforces HTTPS", "Domain Uses Strong HSTS", "IP",
-    "Server Header", "Server Version", "HTTPS Cert Chain Length",
+    "Server Header", "Server Version", "Status Code", "HTTPS Cert Chain Length",
     "HTTPS Probably Missing Intermediate Cert", "Notes", "Unknown Error",
 ]
 
@@ -183,6 +183,7 @@ def result_for(domain):
         'IP': get_domain_ip(domain),
         'Server Header': get_domain_server_header(domain),
         'Server Version': get_domain_server_version(domain),
+        'Status Code': get_domain_status_code(domain),
         'Notes': get_domain_notes(domain),
         'Unknown Error': did_domain_error(domain),
     }
@@ -544,6 +545,7 @@ def basic_check(endpoint):
         endpoint.redirect = True
         logging.warning("{}: Found redirect.".format(endpoint.url))
 
+    endpoint.ultimate_req = req
     ultimate_req = None
     if endpoint.redirect:
         try:
@@ -582,7 +584,7 @@ def basic_check(endpoint):
             endpoint.unknown_error = True
             logging.warning("{}: Unexpected other unknown exception when handling redirect.".format(endpoint.url))
             utils.debug("  {}: {}".format(endpoint.url, err))
-            return
+            pass
 
         try:
             # Now establish whether the redirects were:
@@ -713,6 +715,9 @@ def check_redirect_chain(endpoint):
             entry_downgrade = ""
             entry_https = "HTTP"
             entry_hsts = ""
+            entry_status = ""
+            if redirect_entry.status_code:
+                entry_status = str(redirect_entry.status_code)
             if "https://" in redirect_entry.url:
                 https = True
                 entry_https = "HTTPS"
@@ -724,7 +729,7 @@ def check_redirect_chain(endpoint):
                 downgrade = True
                 entry_downgrade = "-Downgrade"
                 logging.warning("{}: Downgrade in redirect to {}.".format(endpoint.url, redirect_entry.url))
-            redirect_chain.append("{} ({}{}{})".format(redirect_entry.url, entry_https, entry_hsts, entry_downgrade))
+            redirect_chain.append("{} ({}{}{} {})".format(redirect_entry.url, entry_https, entry_hsts, entry_downgrade, entry_status))
         if downgrade:
             logging.warning("{}: Downgrade found in redirect chain {}.".format(endpoint.url, redirect_chain))
         endpoint.redirect_chain = redirect_chain
@@ -2079,6 +2084,23 @@ def get_domain_server_version(domain):
         return domain.httpwww.server_version
     if domain.http.server_version is not None:
         return domain.http.server_version
+    return None
+
+
+def get_domain_status_code(domain):
+    """
+    Get the status code for the response.
+    """
+    if domain.canonical.status is not None:
+        return domain.canonical.status
+    if domain.https.status is not None:
+        return domain.https.status
+    if domain.httpswww.status is not None:
+        return domain.httpswww.status
+    if domain.httpwww.status is not None:
+        return domain.httpwww.status
+    if domain.http.status is not None:
+        return domain.http.status
     return None
 
 

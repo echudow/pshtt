@@ -1473,7 +1473,6 @@ def checkCertChain(endpoint, certchain):
         pt_file = None
         if CA_FILE:
             all_file = CA_FILE
-            pt_file = CA_FILE
         if PT_INT_CA_FILE:
             pt_file = PT_INT_CA_FILE
         if all_file is None:
@@ -1509,7 +1508,7 @@ def checkCertChain(endpoint, certchain):
                 if os.path.exists("./cache/"):
                     new_certs_filename = "./cache/" + new_certs_filename
                 else:
-                    new_certs_filename = "./tmp/" + new_certs_filename
+                    new_certs_filename = "/tmp/" + new_certs_filename
                 if new_certs_filename != certs_filename:
                     shutil.copyfile(certs_filename, new_certs_filename)
                 with open(new_certs_filename, 'ab') as new_certs_file:

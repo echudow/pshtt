@@ -56,7 +56,7 @@ HEADERS = [
     "HSTS Preload Ready", "HSTS Preload Pending", "HSTS Preloaded",
     "Base Domain HSTS Preloaded", "Domain Supports HTTPS",
     "Domain Enforces HTTPS", "Domain Uses Strong HSTS", "IP",
-    "Server Header", "Server Version", "HTTPS Cert Chain Length",
+    "Server Header", "Server Version", "Status Code", "HTTPS Cert Chain Length",
     "HTTPS Probably Missing Intermediate Cert", "Notes", "Unknown Error",
 ]
 
@@ -152,6 +152,7 @@ def result_for(domain):
         'IP': get_domain_ip(domain),
         'Server Header': get_domain_server_header(domain),
         'Server Version': get_domain_server_version(domain),
+        'Status Code': get_domain_status_code(domain),
         'Notes': get_domain_notes(domain),
         'Unknown Error': did_domain_error(domain),
     }
@@ -1398,6 +1399,21 @@ def get_domain_server_version(domain):
         return domain.http.server_version
     return None
 
+def get_domain_status_code(domain):
+    """
+    Get the status code for the response.
+    """
+    if domain.canonical.status is not None:
+        return domain.canonical.status
+    if domain.https.status is not None:
+        return domain.https.status
+    if domain.httpswww.status is not None:
+        return domain.httpswww.status
+    if domain.httpwww.status is not None:
+        return domain.httpwww.status
+    if domain.http.status is not None:
+        return domain.http.status
+    return None
 
 def get_domain_notes(domain):
     """

@@ -725,6 +725,8 @@ def check_redirect_chain(endpoint):
                     entry_https = "ADFS_HTTPS"
                 if redirect_entry.headers.get("Strict-Transport-Security"):
                     entry_hsts = "+HSTS"
+                if redirect_entry.status_code == 307 and redirect_entry.headers and "/adfs/ls?" in redirect_entry.headers.get("Location"):
+                    entry_status = "307+ADFS_REDIRECT (No HSTS Check)"
             if https and "http://" in redirect_entry.url:
                 downgrade = True
                 entry_downgrade = "-Downgrade"
@@ -746,6 +748,7 @@ def hsts_check(endpoint):
 
     Disqualify domains with a bad host, they won't work as valid HSTS.
     """
+    global SCAN_ADFS
     try:
         if not endpoint.live or len(endpoint.headers) == 0:
             return
@@ -764,26 +767,33 @@ def hsts_check(endpoint):
             header = endpoint.adfs_req.headers.get("Strict-Transport-Security")
 
         if header is None:
-            endpoint.hsts = False
-            return
+            if SCAN_ADFS and endpoint.status == 307 and "/adfs/ls?" in endpoint.headers.get("Location"):
+                endpoint.hsts = None
+                logging.warning("{}: Found 307 redirect to ADFS, so not checking HSTS.".format(endpoint.url))
+                return
+            else:
+                endpoint.hsts = False
+                return
 
         endpoint.hsts_header = header
 
         if endpoint.https_bad_hostname:
             endpoint.hsts = False
             return
-            
+
         endpoint.hsts = True
 
         # Set max age to the string after max-age
         # TODO: make this more resilient to pathological HSTS headers.
 
-        # handle multiple HSTS headers, requests comma-separates them
+        # handle multiple HSTS directives, requests comma-separates them
         first_pass = re.split(r',\s?', header)[0]
         second_pass = re.sub(r'\'', '', first_pass)
+        third_pass = re.sub(r'\s', '', second_pass)
 
-        temp = re.split(r';\s?', second_pass)
+        temp = re.split(r';\s?', third_pass)
 
+        # only looks for max-age in the first directive, technically should look at each directive
         if "max-age" in header.lower():
             endpoint.hsts_max_age = int(temp[0][len("max-age="):])
 
@@ -1072,7 +1082,7 @@ def https_check(endpoint, check_for_intermediate_cert=True):
             endpoint.https_cert_chain_len = len(certificate_chain)
             if (
                     endpoint.https_self_signed_cert is False and (
-                        endpoint.https_cert_chain_len < 2
+                        endpoint.https_cert_chain_len < 4
                     )
             ):
                 # *** TODO check that it is not a bad hostname and that the root cert is trusted before suggesting that it is an intermediate cert issue.
@@ -2165,7 +2175,7 @@ def load_preload_list():
     utils.debug("Fetching Chrome preload list from source...", divider=True)
 
     # Downloads the chromium preloaded domain list and sets it to a global set
-    file_url = 'https://chromium.googlesource.com/chromium/src/net/+/master/http/transport_security_state_static.json?format=TEXT'
+    file_url = 'https://chromium.googlesource.com/chromium/src/+/main/net/http/transport_security_state_static.json?format=TEXT'
 
     try:
         request = requests.get(file_url)

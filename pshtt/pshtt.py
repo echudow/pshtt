@@ -2,8 +2,9 @@
 
 from . import utils
 from .models import Domain, Endpoint
-from publicsuffix import PublicSuffixList
-from publicsuffix import fetch
+# from publicsuffix import PublicSuffixList # deprecated
+# from publicsuffix import fetch # deprecated
+from publicsuffixlist.compat import PublicSuffixList
 
 import requests
 import re
@@ -2216,14 +2217,16 @@ def load_suffix_list():
     # File does not exist, download current list and cache it at given location.
     utils.debug("Downloading the Public Suffix List...", divider=True)
     try:
-        cache_file = fetch()
+        # cache_file = fetch() # deprecated
+        from publicsuffixlist.update import updatePSL
+        updatePSL()
     except URLError as err:
         logging.warning("Unable to download the Public Suffix List...")
         utils.debug("  {}".format(err))
         return []
-    content = cache_file.readlines()
-    suffixes = PublicSuffixList(content)
-    return suffixes, content
+    # content = cache_file.readlines() # deprecated
+    suffixes = PublicSuffixList()
+    return suffixes, None
 
 
 def initialize_external_data(
@@ -2310,9 +2313,9 @@ def initialize_external_data(
         else:
             suffix_list, raw_content = load_suffix_list()
 
-            if cache_suffix_list:
-                utils.debug("Caching suffix list at %s" % cache_suffix_list, divider=True)
-                utils.write(''.join(raw_content), cache_suffix_list)
+            # if cache_suffix_list:
+            #    utils.debug("Caching suffix list at %s" % cache_suffix_list, divider=True)
+            #    utils.write(''.join(raw_content), cache_suffix_list)
 
 
 def inspect_domains(domains, options):

@@ -69,7 +69,8 @@ setup(
         'docopt>=0.6.2',
         'pytablereader>=0.15.0',
         'pytablewriter>=0.27.2',
-        'publicsuffix>=1.1.0',
+        # 'publicsuffix>=1.1.0', # deprecated
+        'publicsuffixlist>=0.6.4',
         'pyopenssl>=17.5.0',
         'python-dateutil>=2.7.3',
         'pytz>=2018.5',

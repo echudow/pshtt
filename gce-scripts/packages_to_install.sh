@@ -27,8 +27,11 @@ echo $? ' ERROR CODE'
 echo 'SSLYZE'
 pip3 install sslyze -qq
 echo $? ' ERROR CODE'
-echo 'PUBLIC SUFFIX'
-pip3 install publicsuffix -qq
+# echo 'PUBLIC SUFFIX' # deprecated
+# pip3 install publicsuffix -qq
+# echo $? ' ERROR CODE'
+echo 'PUBLIC SUFFIX LIST'
+pip3 install publicsuffixlist -qq
 echo $? ' ERROR CODE'
 echo 'REQUESTS'
 pip3 install --upgrade requests -qq

@@ -11,13 +11,14 @@ import re
 import base64
 import json
 import os
+from os import path, stat
 import shutil
 import logging
 import sys
 import codecs
 import OpenSSL
 import threading
-import datetime
+from datetime import datetime, timedelta
 
 from OpenSSL import crypto
 import certifi
@@ -2214,18 +2215,36 @@ def load_preload_list():
 # Returns an instantiated PublicSuffixList object, and the
 # list of lines read from the file.
 def load_suffix_list():
-    # File does not exist, download current list and cache it at given location.
-    utils.debug("Downloading the Public Suffix List...", divider=True)
+    global suffix_list
+    # ensure that only one thread runs this function, and have all threads wait until it finishes
+    init_lock.acquire()
+    if suffix_list is not None:
+        init_lock.release()
+        return suffix_list, None
+
+    # Suffix_list is not loaded, download current list and cache it at given location.
+    utils.debug("Loading the Public Suffix List...", divider=True)
     try:
         # cache_file = fetch() # deprecated
+        from publicsuffixlist import PSLFILE
         from publicsuffixlist.update import updatePSL
-        updatePSL()
+        if not path.exists(PSLFILE):
+            utils.debug("Downloading the Public Suffix List...", divider=True)
+            updatePSL()
+        else:
+            psl_age = datetime.now() - datetime.fromtimestamp(stat(PSLFILE).st_mtime)
+            if psl_age > timedelta(hours=24):
+                utils.debug("Downloading the Public Suffix List...", divider=True)
+                updatePSL()
     except URLError as err:
         logging.warning("Unable to download the Public Suffix List...")
         utils.debug("  {}".format(err))
+        init_lock.release()
         return []
     # content = cache_file.readlines() # deprecated
     suffixes = PublicSuffixList()
+    suffix_list = suffixes
+    init_lock.release()
     return suffixes, None
 
 
@@ -2313,9 +2332,11 @@ def initialize_external_data(
         else:
             suffix_list, raw_content = load_suffix_list()
 
-            # if cache_suffix_list:
-            #    utils.debug("Caching suffix list at %s" % cache_suffix_list, divider=True)
-            #    utils.write(''.join(raw_content), cache_suffix_list)
+            if cache_suffix_list:
+                utils.debug("Caching suffix list at %s" % cache_suffix_list, divider=True)
+            #   utils.write(''.join(raw_content), cache_suffix_list)
+                from publicsuffixlist import PSLFILE
+                shutil.copyfile(PSLFILE, cache_suffix_list)
 
 
 def inspect_domains(domains, options):

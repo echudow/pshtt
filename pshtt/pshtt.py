@@ -757,15 +757,15 @@ def hsts_check(endpoint):
 
         header = endpoint.headers.get("Strict-Transport-Security")
 
-        if header is None and endpoint.ultimate_req and endpoint.url in endpoint.ultimate_req.url:
+        if header is None and (endpoint.ultimate_req is not None) and endpoint.url in endpoint.ultimate_req.url:
             header = endpoint.ultimate_req.headers.get("Strict-Transport-Security")
 
-        if header is None and endpoint.ultimate_req and endpoint.ultimate_req.history:
+        if header is None and (endpoint.ultimate_req is not None) and (endpoint.ultimate_req.history is not None):
             for entry in endpoint.ultimate_req.history:
                 if header is None and endpoint.url in entry.url:
                     header = entry.headers.get("Strict-Transport-Security")
 
-        if header is None and endpoint.adfs_req:
+        if header is None and (endpoint.adfs_req is not None):
             header = endpoint.adfs_req.headers.get("Strict-Transport-Security")
 
         if header is None:

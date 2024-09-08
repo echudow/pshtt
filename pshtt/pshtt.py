@@ -717,10 +717,10 @@ def try_redirect(endpoint, url, previous_req, depth):
                         immediate = location_header
                     else:
                         immediate = urlparse.urljoin(url, location_header)
-                if (immediate == url): 
-                    utils.debug("  {}: Redirect from url {} goes to same url... stopping redirect chain".format(endpoint.url, url))
-                else:
-                    ultimate_req = try_redirect(endpoint, immediate, req, (depth - 1))
+                    if (immediate == url): 
+                        utils.debug("  {}: Redirect from url {} goes to same url... stopping redirect chain".format(endpoint.url, url))
+                    else:
+                        ultimate_req = try_redirect(endpoint, immediate, req, (depth - 1))
             except Exception as err:
                 # swallow exceptions
                 utils.debug("  {}: Exception processing redirect headers in response from url {}: {}".format(endpoint.url, url, err))

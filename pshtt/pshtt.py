@@ -569,18 +569,20 @@ def basic_check(endpoint):
             utils.debug("  {} {}".format(endpoint.url, err))
 
         try:
-            with ping(endpoint.url, allow_redirects=True, verify=False) as ultimate_req:
+            # try using try_redirect rather than ping
+            # with ping(endpoint.url, allow_redirects=True, verify=False) as ultimate_req:
+            with try_redirect(endpoint, immediate, req, 5) as ultimate_req:
                 pass
         except requests.exceptions.RequestException as err:
             # Swallow connection errors, but we won't be saving redirect info.
-            logging.debug("{}: Unexpected exception when trying to follow redirect. {}.".format(endpoint.url, err))
+            logging.debug("{}: Unexpected exception1 when trying to follow redirect. {}.".format(endpoint.url, err))
             pass
         except OpenSSL.SSL.Error as err:
             # Swallow connection errors, but we won't be saving redirect info.
-            logging.debug("{}: Unexpected exception when trying to follow redirect. {}.".format(endpoint.url, err))
+            logging.debug("{}: Unexpected exception2 when trying to follow redirect. {}.".format(endpoint.url, err))
             pass
         except dns.exception.DNSException as err:
-            logging.debug("{}: Unexpected exception when trying to follow redirect. {}.".format(endpoint.url, err))
+            logging.debug("{}: Unexpected exception3 when trying to follow redirect. {}.".format(endpoint.url, err))
             pass
         except Exception as err:
             endpoint.unknown_error = True
@@ -695,6 +697,39 @@ def basic_check(endpoint):
         utils.debug("  {}: {}".format(endpoint.url, err))
 
     check_redirect_chain(endpoint)
+
+
+def try_redirect(endpoint, url, previous_req, depth):
+    """
+    Build redirect chain manually so we'll have the partial redirects even if a URL has an error
+    (ping uses requests.get which will error entirely if one of the redirects results in an error)
+    """
+    ultimate_req = None
+    try:
+        utils.debug("  {}: Checking redirect at {} (depth {})".format(endpoint.url, url, depth))
+        with ping(url, allow_redirects=False, verify=False) as req:
+            req.history.extend(previous_req.history)
+            req.history.append(previous_req)
+            try:
+                if (depth > 0 and req.headers.get('Location') is not None) and str(req.status_code).startswith('3'):
+                    location_header = req.headers.get('Location')
+                    if location_header.startswith("http:") or location_header.startswith("https:"):
+                        immediate = location_header
+                    else:
+                        immediate = urlparse.urljoin(url, location_header)
+                if (immediate == url): 
+                    utils.debug("  {}: Redirect from url {} goes to same url... stopping redirect chain".format(endpoint.url, url))
+                else:
+                    ultimate_req = try_redirect(endpoint, immediate, req, (depth - 1))
+            except Exception as err:
+                # swallow exceptions
+                utils.debug("  {}: Exception processing redirect headers in response from url {}: {}".format(endpoint.url, url, err))
+            if ultimate_req is None:
+                ultimate_req = req
+        return ultimate_req
+    except Exception as err:
+        utils.debug("  {}: Exception for redirect url {}: {}".format(endpoint.url, url, err))
+    return None
 
 
 def check_redirect_chain(endpoint):

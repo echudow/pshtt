@@ -401,11 +401,14 @@ def basic_check(endpoint):
 
     except requests.exceptions.SSLError as err:
         if (
-                "bad handshake" in str(err) and (
-                    "sslv3 alert handshake failure" in str(err) or (
-                        "Unexpected EOF" in str(err)
-                    )
-                )
+               ("bad handshake" in str(err) and 
+                   ("sslv3 alert handshake failure" in str(err) or 
+                       "Unexpected EOF" in str(err)
+                   )  
+               ) or 
+               (
+                   "tlsv13 alert certificate required" in str(err)
+               )
         ):
             logging.warning("{}: Error completing TLS handshake usually due to required client authentication.".format(endpoint.url))
             utils.debug("  {}: {}".format(endpoint.url, err))
@@ -415,7 +418,9 @@ def basic_check(endpoint):
                 # sslyze will run later and check if it is not valid
                 endpoint.https_valid = True
                 endpoint.https_full_connection = False
-
+                if "tlsv13 alert certificate required" in str(err):
+                    endpoint.https_client_auth_required = True
+                    logging.warning("{}: Client Authentication REQUIRED".format(endpoint.url))
         else:
             logging.warning("{}: Error connecting over SSL/TLS or validating certificate.".format(endpoint.url))
             utils.debug("  {}: {}".format(endpoint.url, err))
@@ -436,6 +441,9 @@ def basic_check(endpoint):
                     endpoint.https_full_connection = False
                     # HTTPS may still be valid, sslyze will double-check later
                     endpoint.https_valid = True
+                    if "tlsv13 alert certificate required" in str(err):
+                        endpoint.https_client_auth_required = True
+                        logging.warning("{}: Client Authentication REQUIRED".format(endpoint.url))			
                 logging.warning("{}: Unexpected SSL protocol (or other) error during retry.".format(endpoint.url))
                 utils.debug("  {}: {}".format(endpoint.url, err))
                 # continue on to SSLyze to check the connection

@@ -505,7 +505,7 @@ def basic_check(endpoint):
         return
 
     except Exception as err:
-	if ("tlsv13 alert certificate required" in str(err)):
+        if ("tlsv13 alert certificate required" in str(err)):
             # Sometimes this Exception doesn't come as an SSLError, so handling it here too
             logging.warning("{}: Error completing TLS handshake usually due to required client authentication (other exception).".format(endpoint.url))
             utils.debug("  {}: {}".format(endpoint.url, err))

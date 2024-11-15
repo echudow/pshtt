@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 
 from . import utils
+import pshtt
+VDATE = "20241115-1000"
 from .models import Domain, Endpoint
 # from publicsuffix import PublicSuffixList # deprecated
 # from publicsuffix import fetch # deprecated
@@ -503,10 +505,23 @@ def basic_check(endpoint):
         return
 
     except Exception as err:
-        endpoint.unknown_error = True
-        logging.warning("{}: Unexpected other unknown exception during initial request.".format(endpoint.url))
-        utils.debug("  {}: {}".format(endpoint.url, err))
-        return
+	if ("tlsv13 alert certificate required" in str(err)):
+            # Sometimes this Exception doesn't come as an SSLError, so handling it here too
+            logging.warning("{}: Error completing TLS handshake usually due to required client authentication (other exception).".format(endpoint.url))
+            utils.debug("  {}: {}".format(endpoint.url, err))
+            endpoint.live = True
+            if endpoint.protocol == "https":
+                # The https can still be valid with a handshake error,
+                # sslyze will run later and check if it is not valid
+                endpoint.https_valid = True
+                endpoint.https_full_connection = False
+                endpoint.https_client_auth_required = True
+                logging.warning("{}: Client Authentication REQUIRED".format(endpoint.url))
+        else:
+            endpoint.unknown_error = True
+            logging.warning("{}: Unexpected other unknown exception during initial request.".format(endpoint.url))
+            utils.debug("  {}: {}".format(endpoint.url, err))
+            return
 
     # Run SSLyze to see if there are any errors
     if(endpoint.protocol == "https"):
@@ -879,6 +894,7 @@ def patched_get_preconfigured_ssl_connection(
 
 # Perform one-time initialization
 def init(environment, options):
+    logging.info("Initializing pshtt... version is {} (date {})".format(pshtt.__version__, VDATE))
     utils.debug("Initializing pshtt (patching sslyze legacy ssl client function)...")
     ServerConnectivityInfo.get_preconfigured_ssl_connection = patched_get_preconfigured_ssl_connection
 

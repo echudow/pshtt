@@ -284,6 +284,28 @@ def result_for(domain):
     return result
 
 
+# patch ssl ocsp code since it doesn't handle multiple ocsp responses gracefully
+from cryptography.hazmat.backends.openssl import backend
+from nassl.ssl_client import SslClient
+orig_get_tlsext_status_ocsp_resp = SslClient.get_tlsext_status_ocsp_resp
+
+
+def patched_get_tlsext_status_ocsp_resp(*args):
+    try:
+        ocsp_resp = orig_get_tlsext_status_ocsp_resp(*args)
+        if ocsp_resp is not None:
+            logging.debug("  OCSP response is not None.")    
+            backend.load_der_ocsp_response(ocsp_resp.as_der_bytes())
+        return ocsp_resp
+    except Exception as err:
+        logging.debug("  Caught OCSP error (%s) in sslyze/openssl... ignoring, assuming OCSP is fine and certificate is valid.", str(err))
+        #logging.exception("  Exception: %s", str(err))
+        return None
+    
+
+SslClient.get_tlsext_status_ocsp_resp = patched_get_tlsext_status_ocsp_resp
+
+
 def do_dns_lookup(hostname):
     answer = None
     if hostname in DNS_CACHE:
@@ -311,8 +333,6 @@ def patched_create_connection(address, *args, **kwargs):
     answer = do_dns_lookup(host)
     ip = answer.rrset[0].address
     return _orig_create_connection((ip, port), *args, **kwargs)
-
-# from sslyze.server_connectivity_tester import ServerConnectivityTester _orig_do_dns_lookup = ServerConnectivityTester._do_dns_lookup
 
 
 def patched_do_dns_lookup(cls, hostname: str, port: int) -> str:
@@ -394,34 +414,28 @@ def ping(url, allow_redirects=False, verify=True):
         # logging.debug("Using CA_FILE from %s", verify)
 
     req = None
-    try:
-        # req = requests.get(
-        req = requests_session.get(
-            url,
-            allow_redirects=allow_redirects,
-            # Validate certificates.
-            verify=verify,
-            # Setting this to true delays the retrieval of the content
-            # until we access Response.content.  Since we aren't
-            # interested in the actual content of the request, this will
-            # save us time and bandwidth.
-            #
-            # This will also stop pshtt from hanging on URLs that stream
-            # neverending data, like webcams.  See issue #138:
-            # https://github.com/dhs-ncats/pshtt/issues/138
-            stream=True,
-            # set by --user_agent
-            headers={"User-Agent": USER_AGENT},
-            # set by --timeout
-            # read timeout is 5 times longer for slow servers
-            timeout=(TIMEOUT, 5 * TIMEOUT),
-        )
-    except Exception as err:
-        if "Read timed out" in str(err):
-            logging.warning("%s: Request read timed out.", url)
-            return req
-        raise err
-
+    # req = requests.get(
+    req = requests_session.get(
+        url,
+        allow_redirects=allow_redirects,
+        # Validate certificates.
+        verify=verify,
+        # Setting this to true delays the retrieval of the content
+        # until we access Response.content.  Since we aren't
+        # interested in the actual content of the request, this will
+        # save us time and bandwidth.
+        #
+        # This will also stop pshtt from hanging on URLs that stream
+        # neverending data, like webcams.  See issue #138:
+        # https://github.com/dhs-ncats/pshtt/issues/138
+        stream=True,
+        # set by --user_agent
+        headers={"User-Agent": USER_AGENT},
+        # set by --timeout
+        # read timeout is 5 times longer for slow servers
+        timeout=(TIMEOUT, 5 * TIMEOUT),
+    )
+    
     return req
 
 
@@ -450,12 +464,13 @@ def basic_check(endpoint):
                 endpoint.https_valid = True
 
     except requests.exceptions.SSLError as err:
-        if ("bad handshake" in str(err) and (
+#        if ("bad handshake" in str(err) and (
+        if ((
             "sslv3 alert handshake failure" in str(err) or "Unexpected EOF" in str(err)
         )) or (
             "tlsv13 alert certificate required" in str(err)
         ):
-            logging.exception(
+            logging.error(
                 "%s: Error completing TLS handshake usually due to required client authentication.",
                 endpoint.url,
             )
@@ -476,7 +491,8 @@ def basic_check(endpoint):
                 "%s: Error connecting over SSL/TLS or validating certificate.",
                 endpoint.url,
             )
-            if "certificate verify failed" in str(err) or "unsafe legacy renegotiation" in str(err) or "alert bad certificate" in str(err):
+            if ("certificate verify failed" in str(err) or "unsafe legacy renegotiation" in str(err) or "alert bad certificate" in str(err) or 
+               "alert certificate unknown"):
                 pass
             else: 
                 logging.exception("  %s: SSLError exception", endpoint.url)
@@ -500,18 +516,23 @@ def basic_check(endpoint):
                     if "tlsv13 alert certificate required" in str(err):
                         endpoint.https_client_auth_required = True
                         logging.warning("%s: Client Authentication REQUIRED", endpoint.url)
-                logging.exception(
-                    "%s: Unexpected SSL protocol (or other) error during retry.",
-                    endpoint.url,
-                )
-                utils.debug("  %s: %s", endpoint.url, str(err))
+                logging.error("%s: SSL protocol (or other) error during retry.", endpoint.url,)
+                if ("certificate verify failed" in str(err) or "unsafe legacy renegotiation" in str(err) or "alert bad certificate" in str(err) or 
+                   "alert certificate unknown"):
+                    pass
+                else: 
+                    logging.exception("  %s: SSLError exception", endpoint.url)
+                    utils.debug("  %s: %s", endpoint.url, str(err))
                 # continue on to SSLyze to check the connection
             except requests.exceptions.RequestException as err:
                 endpoint.live = False
-                logging.exception(
-                    "%s: Unexpected requests exception during retry.", endpoint.url
-                )
-                utils.debug("  %s: %s", endpoint.url, err)
+                if "Connection reset" in str(err) or "Remote end closed connection without response" in str(err):
+                    logging.debug("%s: Connection reset during retry.", endpoint.url)
+                else: 
+                    logging.exception(
+                        "%s: Unexpected requests exception during retry.", endpoint.url
+                    )
+                    utils.debug("  %s: %s", endpoint.url, err)
                 return
             except OpenSSL.SSL.Error as err:
                 endpoint.live = False
@@ -544,7 +565,7 @@ def basic_check(endpoint):
         # unless SSLyze encounters a connection error later
         endpoint.live = True
 
-    except requests.exceptions.ConnectTimeout:
+    except (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout):
         if endpoint.protocol == "https":
             # https check later will set whether the endpoint is live and valid
             endpoint.https_full_connection = False
@@ -649,7 +670,7 @@ def basic_check(endpoint):
                     )
     except Exception:
         # if the socket has already closed, it will throw an exception, but this is just best effort, so ignore it
-        logging.exception("Error closing socket")
+        logging.debug("Error closing socket")
 
     # Endpoint is live, analyze the response.
     endpoint.headers = req.headers
@@ -694,17 +715,21 @@ def basic_check(endpoint):
         try:
             # try using try_redirect rather than ping
             # with ping(endpoint.url, allow_redirects=True, verify=False) as ultimate_req:
-            with try_redirect(endpoint, immediate, req, 5) as ultimate_req:
-                utils.debug("%s: Trying to follow redirect", endpoint.url)
-                pass
-        except (requests.exceptions.RequestException, OpenSSL.SSL.Error) as err:
+            utils.debug("%s: Trying to follow redirect", endpoint.url)
+            ultimate_req = try_redirect(endpoint, immediate, req, 5)
+            if ultimate_req is not None:
+                ultimate_req.close()
+        except (requests.exceptions.RequestException, requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout, OpenSSL.SSL.Error) as err:
             # Swallow connection errors, but we won't be saving redirect info.
-            logging.exception("Connection error")
+            logging.error("Connection error")
             utils.debug("  %s: %s", endpoint.url, err)
+            if ultimate_req is not None:
+                ultimate_req.close()
         except dns.exception.DNSException as err:
-            logging.exception("DNS error")
+            logging.error("DNS error")
             utils.debug("  %s: %s", endpoint.url, err)
-            pass 
+            if ultimate_req is not None:
+                ultimate_req.close()
         except Exception as err:
             endpoint.unknown_error = True
             logging.exception(
@@ -712,7 +737,8 @@ def basic_check(endpoint):
                 endpoint.url,
             )
             utils.debug("  %s: %s", endpoint.url, err)
-            pass
+            if ultimate_req is not None:
+                ultimate_req.close()
 
         try:
             # Now establish whether the redirects were:
@@ -806,7 +832,7 @@ def basic_check(endpoint):
                     utils.debug("%s: Trying ADFS URL for HSTS check at %s.", endpoint.url, endpoint.url + "/adfs/ls/")
                     with ping(endpoint.url + "/adfs/ls/", allow_redirects=False, verify=False) as adfs_req:
                         pass
-                except (requests.exceptions.RequestException, requests.exceptions.ConnectTimeout,  OpenSSL.SSL.Error):
+                except (requests.exceptions.RequestException, requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout, OpenSSL.SSL.Error):
                     # Swallow connection errors, but we won't be saving redirect info.
                     pass
                 except Exception as err:
@@ -965,8 +991,11 @@ def hsts_check(endpoint):
         temp = re.split(r';\s?', third_pass)
 
         # only looks for max-age in the first directive, technically should look at each directive
-        if "max-age" in header.lower():
-            endpoint.hsts_max_age = int(temp[0][len("max-age=") :])
+        try:
+            if "max-age" in header.lower():
+                endpoint.hsts_max_age = int(temp[0][len("max-age=") :])
+        except Exception as err:
+            logging.warning("%s: Error converting HSTS max-age to integer (received '%s')", endpoint.url, temp[0])
 
         if endpoint.hsts_max_age is None or endpoint.hsts_max_age <= 0:
             endpoint.hsts = False
@@ -1037,9 +1066,18 @@ def https_check(endpoint, check_for_intermediate_cert=True):
             logging.warning("%s: Client Authentication REQUIRED", endpoint.url)
     except ConnectionToServerFailed as err:
         endpoint.live = False
-        endpoint.https_valid = False
+        endpoint.https_valid = None
         if "could not find a TLS version and cipher suite" in str(err):
             logging.warning("%s: sslyze could not find a TLS version and cipher suite supported by the server.", endpoint.url)
+            return
+        if "timed out" in str(err):
+            logging.warning("%s: sslyze connectivity check timed out.", endpoint.url)
+            return
+        if "Server rejected" in str(err):
+            logging.warning("%s: sslyze connectivity check timed out.", endpoint.url)
+            return
+        if "illegal parameter" in str(err):
+            logging.warning("%s: sslyze connectivity check had unexpected connection error (illegal parameter).", endpoint.url)
             return
         logging.exception(
             "%s: Error in sslyze server connectivity check when connecting to %s",
@@ -1050,7 +1088,7 @@ def https_check(endpoint, check_for_intermediate_cert=True):
         return
     except dns.exception.DNSException as err:
         endpoint.live = False
-        endpoint.https_valid = False
+        endpoint.https_valid = None
         logging.warning("%s: DNS exception in sslyze connectivity check.", endpoint.url)
         utils.debug("  %s: %s", endpoint.url, err)
         return
@@ -1088,21 +1126,33 @@ def https_check(endpoint, check_for_intermediate_cert=True):
         scanner.queue_scan(scan_request)
         # Retrieve results from generator object
         scan_result = [x for x in scanner.get_results()][0]
-        cert_plugin_result = scan_result.scan_commands_results[
-            ScanCommand.CERTIFICATE_INFO
-        ]
+        if ScanCommand.CERTIFICATE_INFO in scan_result.scan_commands_results:
+            cert_plugin_result = scan_result.scan_commands_results[
+                ScanCommand.CERTIFICATE_INFO
+            ]
+        for scan_command, error in scan_result.scan_commands_errors.items():
+            if error is not None and error.exception_trace is not None:
+                logging.debug("  %s: sslyze certificate_info scan error: %s\r\n%s", endpoint.url, error, str(error.exception_trace))
+            else:
+                logging.debug("  %s: sslyze certificate_info scan error: %s", endpoint.url, error)
     except Exception as err:
         try:
             if "timed out" in str(err):
-                logging.exception(
+                logging.error(
                     "%s: Retrying sslyze scanner certificate plugin.", endpoint.url
                 )
                 scanner.queue_scan(scan_request)
                 # Consume the generator object and retrieve the first result
                 scan_result = [x for x in scanner.get_results()][0]
-                cert_plugin_result = scan_result.scan_commands_results[
-                    ScanCommand.CERTIFICATE_INFO
-                ]
+                if ScanCommand.CERTIFICATE_INFO in scan_result.scan_commands_results:
+                    cert_plugin_result = scan_result.scan_commands_results[
+                        ScanCommand.CERTIFICATE_INFO
+                    ]
+                for scan_command, error in scan_result.scan_commands_errors.items():
+                    if error is not None and error.exception_trace is not None:
+                        logging.debug("  %s: sslyze certificate_info scan error: %s\r\n%s", endpoint.url, error, str(error.exception_trace))
+                    else:
+                        logging.debug("  %s: sslyze certificate_info scan error: %s", endpoint.url, error)
             else:
                 logging.exception(
                     "%s: Unknown exception in sslyze scanner certificate plugin.",
@@ -1126,6 +1176,9 @@ def https_check(endpoint, check_for_intermediate_cert=True):
             endpoint.https_valid = None
             return
 
+    if cert_plugin_result is None or cert_plugin_result.certificate_deployments is None:
+        utils.debug("  %s: sslyze was unable to get certificate information", endpoint.url)
+        return
     try:
         # Default endpoint assessments to False until proven True.
         endpoint.https_expired_cert = False
@@ -2236,6 +2289,7 @@ def load_preload_pending():
         requests.exceptions.SSLError,
         requests.exceptions.ConnectionError,
         requests.exceptions.ConnectTimeout,
+        requests.exceptions.ReadTimeout,
     ) as err:
         logging.exception("  Failed to fetch pending preload list: %s", pending_url)
         logging.debug(err)
@@ -2274,7 +2328,8 @@ def load_preload_list():
     except (
         requests.exceptions.SSLError,
         requests.exceptions.ConnectionError,
-        requests.exceptions.ConnectTimeout,
+        requests.exceptions.ConnectTimeout, 
+        requests.exceptions.ReadTimeout,
     ) as err:
         logging.exception(  "Failed to fetch preload list: %s", file_url)
         logging.debug(err)

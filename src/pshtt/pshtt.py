@@ -137,8 +137,11 @@ DNS_CACHE = {}
 #stores requests_sessions for reuse
 requests_sessions = {}
 
+#stores requests_responses to track and close
+requests_responses = {}
+
 def inspect(base_domain):
-    global requests_sessions
+    global requests_sessions, requests_responses
 
     """Inpsect the provided domain."""
     domain = Domain(base_domain)
@@ -146,6 +149,9 @@ def inspect(base_domain):
     domain.httpwww = Endpoint("http", "www", base_domain)
     domain.https = Endpoint("https", "root", base_domain)
     domain.httpswww = Endpoint("https", "www", base_domain)
+
+    for endpoint in [domain.http, domain.httpwww, domain.https, domain.httpswww]:
+        requests_responses[endpoint] = []
 
     # Analyze HTTP endpoint responsiveness and behavior.
     basic_check(domain.http)
@@ -157,16 +163,34 @@ def inspect(base_domain):
     hsts_check(domain.https)
     hsts_check(domain.httpswww)
 
+    # try to forcibly close any open sockets
+    for endpoint in [domain.http, domain.httpwww, domain.https, domain.httpswww]:
+        try:
+            reqs = requests_responses[endpoint]
+            for req in reqs:
+                try: 
+                    if req is not None:
+                        for conn in req.raw._pool.pool.queue: 
+                            try: 
+                                if conn is not None:
+                                    conn.close()
+                            except Exception as err:
+                                pass
+                except Exception as err:
+                    pass
+        except Exception as err:
+            pass
+        requests_responses[endpoint] = None
+
     # try to close each requests session so we don't have socket leaks
     for endpoint in [domain.http, domain.httpwww, domain.https, domain.httpswww]:
         try:
-            hostname = urlparse.urlparse(endpoint.url).hostname
-            if hostname in requests_sessions and requests_sessions[hostname] is not None:
-                requests_session = requests_sessions[hostname]
+            if endpoint in requests_sessions and requests_sessions[endpoint] is not None:
+                requests_session = requests_sessions[endpoint]
                 requests_session.close()
-                requests_sessions[hostname] = None
         except:
             pass
+        requests_sessions[endpoint] = None
 
     return result_for(domain)
 
@@ -370,7 +394,7 @@ def initialize_dns_resolver(options=None):
     return
 
 
-def ping(url, allow_redirects=False, verify=True):
+def ping(endpoint, url, allow_redirects=False, verify=True):
     """Attempt to reach the given URL.
 
     If there is a custom CA file and we want to verify
@@ -394,20 +418,19 @@ def ping(url, allow_redirects=False, verify=True):
     values like multipart/x-mixed-replace;boundary=ffserver that
     indicate that the response body will stream indefinitely.
     """
-    global CA_FILE, requests_sessions
+    global CA_FILE, requests_sessions, requests_responses
 
     # store requests sessions for performance and to close them when done
     requests_session = None
     try:
-        hostname = urlparse.urlparse(url).hostname
-        if hostname in requests_sessions and requests_sessions[hostname] is not None:
-            requests_session = requests_sessions[hostname]
+        if endpoint in requests_sessions and requests_sessions[endpoint] is not None:
+            requests_session = requests_sessions[endpoint]
     except:
         pass
 
     if requests_session is None:
         requests_session = requests.session()
-        requests_sessions[hostname] = requests_session
+        requests_sessions[endpoint] = requests_session
 
     if CA_FILE and verify:
         verify = CA_FILE
@@ -435,6 +458,9 @@ def ping(url, allow_redirects=False, verify=True):
         # read timeout is 5 times longer for slow servers
         timeout=(TIMEOUT, 5 * TIMEOUT),
     )
+
+    if req is not None:
+        requests_responses[endpoint].append(req)
     
     return req
 
@@ -457,7 +483,7 @@ def basic_check(endpoint):
     req = None
 
     try:
-        with ping(endpoint.url) as req:
+        with ping(endpoint, endpoint.url) as req:
             endpoint.live = True
             if endpoint.protocol == "https":
                 endpoint.https_full_connection = True
@@ -499,7 +525,7 @@ def basic_check(endpoint):
                 utils.debug("  %s: %s", endpoint.url, err)
             # Retry with certificate validation disabled.
             try:
-                with ping(endpoint.url, verify=False) as req:
+                with ping(endpoint, endpoint.url, verify=False) as req:
                     endpoint.live = True
                     if endpoint.protocol == "https":
                         endpoint.https_full_connection = True
@@ -714,7 +740,7 @@ def basic_check(endpoint):
 
         try:
             # try using try_redirect rather than ping
-            # with ping(endpoint.url, allow_redirects=True, verify=False) as ultimate_req:
+            # with ping(endpoint, endpoint.url, allow_redirects=True, verify=False) as ultimate_req:
             utils.debug("%s: Trying to follow redirect", endpoint.url)
             ultimate_req = try_redirect(endpoint, immediate, req, 5)
             if ultimate_req is not None:
@@ -830,7 +856,7 @@ def basic_check(endpoint):
             if endpoint.hsts is not True:
                 try:
                     utils.debug("%s: Trying ADFS URL for HSTS check at %s.", endpoint.url, endpoint.url + "/adfs/ls/")
-                    with ping(endpoint.url + "/adfs/ls/", allow_redirects=False, verify=False) as adfs_req:
+                    with ping(endpoint, endpoint.url + "/adfs/ls/", allow_redirects=False, verify=False) as adfs_req:
                         pass
                 except (requests.exceptions.RequestException, requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout, OpenSSL.SSL.Error):
                     # Swallow connection errors, but we won't be saving redirect info.
@@ -866,7 +892,7 @@ def try_redirect(endpoint, url, previous_req, depth):
     ultimate_req = None
     try:
         utils.debug("  %s: Checking redirect at %s (depth %s)", endpoint.url, url, depth)
-        with ping(url, allow_redirects=False, verify=False) as req:
+        with ping(endpoint, url, allow_redirects=False, verify=False) as req:
             req.history.extend(previous_req.history)
             req.history.append(previous_req)
             try:

@@ -488,6 +488,17 @@ def basic_check(endpoint):
             if endpoint.protocol == "https":
                 endpoint.https_full_connection = True
                 endpoint.https_valid = True
+            
+            try:
+                if "http:" in endpoint.url:
+                    hostname = endpoint.url[7:]
+                else:
+                    hostname = endpoint.url[8:]
+                answer = do_dns_lookup(hostname)
+                ip = answer.rrset[0].address
+                endpoint.ip = ip
+            except Exception as err:
+                utils.debug("  %s: Error getting IP address for endpoint after connecting", endpoint.url, err)
 
     except requests.exceptions.SSLError as err:
 #        if ("bad handshake" in str(err) and (
@@ -576,17 +587,6 @@ def basic_check(endpoint):
                 utils.debug("  %s: %s", endpoint.url, err)
                 return
             
-            # If HTTPS, examine certificate to see if there are intermediate certificates that can be trusted that are missing
-            if endpoint.protocol == "https" and req:
-                try:
-                    #certchain = req.peercertchain
-                    #certchain = req.raw.connection.get_peer_cert_chain()
-                    certchain = req.peer_cert_chain
-                    checkCertChain(endpoint, certchain)
-                except Exception as err:
-                    logging.debug("%s: Error getting peercertchain to check for intermediate certs.", endpoint.url)
-                    utils.debug("  %s: %s", endpoint.url, err)
-
         # If it was a certificate error of any kind, it's live,
         # unless SSLyze encounters a connection error later
         endpoint.live = True
@@ -679,24 +679,6 @@ def basic_check(endpoint):
         if endpoint.protocol == "https":
             endpoint.https_full_connection = False
         return
-
-    # try to get IP address if we can
-    try:
-        if req.raw.closed is False:
-            ip = req.raw._connection.sock.socket.getpeername()[0]
-            if endpoint.ip is None:
-                endpoint.ip = ip
-            else:
-                if endpoint.ip != ip:
-                    utils.debug(
-                        "%s: Endpoint IP is already %s, but requests IP is %s.",
-                        endpoint.url,
-                        endpoint.ip,
-                        ip,
-                    )
-    except Exception:
-        # if the socket has already closed, it will throw an exception, but this is just best effort, so ignore it
-        logging.debug("Error closing socket")
 
     # Endpoint is live, analyze the response.
     endpoint.headers = req.headers
@@ -957,7 +939,9 @@ def check_redirect_chain(endpoint):
         if downgrade:
             logging.warning("%s: Downgrade found in redirect chain %s.", endpoint.url, redirect_chain)
         endpoint.redirect_chain = redirect_chain
-        endpoint.notes = str(redirect_chain)
+        if len(endpoint.notes) > 0:
+            endpoint.notes += " "
+        endpoint.notes += "Redirect chain: " + str(redirect_chain)
     except Exception as err:
         logging.warning("%s: Unexpected exception when checking for downgrades in redirects.", endpoint.url)
         utils.debug("  %s: %s", endpoint.url, err)
@@ -1132,6 +1116,13 @@ def https_check(endpoint, check_for_intermediate_cert=True):
         utils.debug("  %s: %s", endpoint.url, err)
         return
 
+    # record timestamp of certs files to know whether it has changed and we should recheck the trust
+    pt_int_filetime = None
+    custom_filetime = None
+    if PT_INT_CA_FILE:
+        pt_int_filetime = os.path.getmtime(PT_INT_CA_FILE)
+    if CA_FILE:
+        custom_filetime = os.path.getmtime(CA_FILE)
     try:
         cert_plugin_result = None
         scanner = Scanner()
@@ -1212,64 +1203,66 @@ def https_check(endpoint, check_for_intermediate_cert=True):
         endpoint.https_bad_chain = False
         endpoint.https_bad_hostname = False
 
-        # Default trust to True until proven False
-        public_trust = True
-        custom_trust = True
+        public_trust = False
+        custom_trust = False
         public_not_trusted_names = []
+        cert_chain = None
+        leaf_matches_hostname = False
         for certificate_deployment in cert_plugin_result.certificate_deployments:
             validation_results = certificate_deployment.path_validation_results
             for result in validation_results:
                 if result.was_validation_successful:
-                    # We're assuming that it is trusted to start with
-                    pass
-                else:
-                    if "Custom" in result.trust_store.name:
-                        custom_trust = False
+                    if "Custom" in result.trust_store.name or "Supplied" in result.trust_store.name:
+                        custom_trust = True
                     else:
-                        public_trust = False
-                        public_not_trusted_names.append(result.trust_store.name)
-
-                cert_chain = None
+                        public_trust = True
+                else:
+                    public_not_trusted_names.append(result.trust_store.name)
                 if STORE in result.trust_store.name:
                     cert_chain = result.verified_certificate_chain
-                if not cert_chain:
-                    cert_chain = certificate_deployment.received_certificate_chain
-                leaf_cert = cert_chain[0]
+                    if not cert_chain:
+                        cert_chain = certificate_deployment.received_certificate_chain
+            
+            # If leaf certificate subject does NOT match hostname, bad hostname
+            # NOTE: Since sslyze 3.0.0, ever since JSON output for certinfo,
+            # SAN(s) are checked as part of _certificate_matches_hostname which
+            # called as part of leaf_certificate_subject_matches_hostname
+            if certificate_deployment.leaf_certificate_subject_matches_hostname:
+                leaf_matches_hostname = True
 
-                # Check for leaf certificate expiration/self-signature.
-                if leaf_cert.not_valid_after < datetime.datetime.now():
-                    endpoint.https_expired_cert = True
+        if leaf_matches_hostname:
+            endpoint.https_bad_hostname = False
+        else:
+            endpoint.https_bad_hostname = True
+
+        if cert_chain is not None:
+            leaf_cert = cert_chain[0]
+
+            # Check for leaf certificate expiration/self-signature.
+            if leaf_cert.not_valid_after < datetime.datetime.now() or leaf_cert.not_valid_before > datetime.datetime.now():
+                endpoint.https_expired_cert = True
+
+            # Check to see if the cert is self-signed
+            if leaf_cert.issuer == leaf_cert.subject:
+                endpoint.https_self_signed_cert = True
+
+            # Check certificate chain till the second last element
+            # The last cert being the root cert is self signed and
+            # hence the self signed check is not valid
+            # NOTE: If this is the only flag that's set, it's probably
+            # an incomplete chain
+            # If this isn't the only flag that is set, it might be
+            # because there is another error. More debugging would
+            # need to be done at this point, but not through sslyze
+            # because sslyze doesn't have enough granularity
+            for cert in cert_chain[:-1]:
+                # Check for certificate expiration
+                if cert.not_valid_after < datetime.datetime.now():
+                    endpoint.https_bad_chain = True
 
                 # Check to see if the cert is self-signed
-                if leaf_cert.issuer == leaf_cert.subject:
-                    endpoint.https_self_signed_cert = True
-
-                # Check certificate chain till the second last element
-                # The last cert being the root cert is self signed and
-                # hence the self signed check is not valid
-                # NOTE: If this is the only flag that's set, it's probably
-                # an incomplete chain
-                # If this isn't the only flag that is set, it might be
-                # because there is another error. More debugging would
-                # need to be done at this point, but not through sslyze
-                # because sslyze doesn't have enough granularity
-                for cert in cert_chain[:-1]:
-                    # Check for certificate expiration
-                    if cert.not_valid_after < datetime.datetime.now():
-                        endpoint.https_bad_chain = True
-
-                    # Check to see if the cert is self-signed
-                    if cert.issuer == cert.subject or not cert.issuer:
-                        endpoint.https_bad_chain = True
-
-                # If leaf certificate subject does NOT match hostname, bad hostname
-                # NOTE: Since sslyze 3.0.0, ever since JSON output for certinfo,
-                # SAN(s) are checked as part of _certificate_matches_hostname which
-                # called as part of leaf_certificate_subject_matches_hostname
-                if (
-                    not certificate_deployment.leaf_certificate_subject_matches_hostname
-                ):
-                    endpoint.https_bad_hostname = True
+                if cert.issuer == cert.subject or not cert.issuer:
+                    endpoint.https_bad_chain = True
 
         if public_trust:
             logging.warning(
@@ -1289,15 +1282,30 @@ def https_check(endpoint, check_for_intermediate_cert=True):
         else:
             custom_trust = None
 
-        if check_for_intermediate_cert and not public_trust and not custom_trust:
+        if check_for_intermediate_cert and not public_trust:
             # Try to see if there is a missing intermediate cert
             try:
+                valid_flag = False
+                missingCert_flag = False
                 for certificate_deployment in cert_plugin_result.certificate_deployments:
                     served_chain = certificate_deployment.received_certificate_chain
                     (valid, missingCert) = checkCertChain(endpoint, served_chain)
-                    if valid:
-                        https_check(endpoint, False)
-                return
+                    if valid is True and valid_flag is False:
+                        valid_flag = valid
+                    if missingCert is True and missingCert_flag is False:
+                        missingCert_flag = missingCert
+                endpoint.https_missing_intermediate_cert = missingCert_flag
+                pt_int_newer = False
+                if PT_INT_CA_FILE:
+                    if pt_int_filetime is None or os.path.getmtime(PT_INT_CA_FILE) > pt_int_filetime:
+                        pt_int_newer = True
+                custom_newer = False
+                if CA_FILE:
+                    if custom_filetime is None or os.path.getmtime(CA_FILE) > custom_filetime:
+                        custom_newer = True
+                if valid_flag or pt_int_newer or custom_newer:
+                    https_check(endpoint, False)
+                    return
             except Exception as err:
                 utils.debug("  %s: Error checking for missing intermediate cert in sslyze results: %s", endpoint.url, err)
         
@@ -1320,18 +1328,13 @@ def https_check(endpoint, check_for_intermediate_cert=True):
             endpoint.https_cert_chain_len += len(
                 certificate_deployment.received_certificate_chain
             )
-        if endpoint.https_self_signed_cert is False and (
-            endpoint.https_cert_chain_len < 4
-        ):
+        if endpoint.https_self_signed_cert is False:
             # *** TODO check that it is not a bad hostname and that the root cert is trusted before suggesting that it is an intermediate cert issue.
-            endpoint.https_missing_intermediate_cert = True
             has_verified_cert_chain = None
             for certificate_deployment in cert_plugin_result.certificate_deployments:
-                if certificate_deployment.verified_certificate_chain is None:
-                    has_verified_cert_chain = False
-                elif certificate_deployment.verified_certificate_chain:
+                if certificate_deployment.verified_certificate_chain is not None:
                     has_verified_cert_chain = True
-            if not has_verified_cert_chain:
+            if not has_verified_cert_chain and endpoint.https_cert_chain_len < 4:
                 logging.warning(
                     "%s: Untrusted certificate chain, probably due to missing intermediate certificate.",
                     endpoint.url,
@@ -1341,7 +1344,7 @@ def https_check(endpoint, check_for_intermediate_cert=True):
                     endpoint.url,
                     endpoint.https_cert_chain_len,
                 )
-            if public_trust is False:
+            if public_trust is False and custom_trust is True:
                 # recheck public trust using custom public trust store with manually added intermediate certificates
                 if PT_INT_CA_FILE is not None:
                     try:
@@ -1364,28 +1367,37 @@ def https_check(endpoint, check_for_intermediate_cert=True):
                         cert_plugin_result = scan_result.scan_commands_results[
                             ScanCommand.CERTIFICATE_INFO
                         ]
-                        has_verified_cert_chain = True
-                        for (
-                            certificate_deployment
-                        ) in cert_plugin_result.certificate_deployments:
-                            if (
-                                certificate_deployment.verified_certificate_chain
-                                is None
-                            ):
-                                has_verified_cert_chain = False
+                        has_verified_cert_chain = False
+                        for certificate_deployment in cert_plugin_result.certificate_deployments:
+                            if certificate_deployment.verified_certificate_chain is not None:
+                                has_verified_cert_chain = True
                         if has_verified_cert_chain:
                             public_trust = True
                             endpoint.https_public_trusted = public_trust
+                            endpoint.https_missing_intermediate_cert = True
                             logging.warning(
                                 "%s: Trusted by special public trust store with intermediate certificates.",
                                 endpoint.url,
                             )
                     except Exception:
                         logging.exception("Error while rechecking public trust")
-        else:
-            endpoint.https_missing_intermediate_cert = False
     except Exception:
         logging.exception("Error while determining length of certificate chain")
+
+    # Document cert chain(s)
+    try:
+        chain_string = "Certificate Chain: "
+        for certificate_deployment in cert_plugin_result.certificate_deployments:
+            served_chain = certificate_deployment.received_certificate_chain
+            chain_string += "(" + str(served_chain[0].subject.rfc4514_string())
+            for cert in served_chain:
+                chain_string += " --> " + str(cert.issuer.rfc4514_string())
+            chain_string += ")"
+        if len(endpoint.notes) > 0:
+            endpoint.notes += " "
+        endpoint.notes += chain_string
+    except Exception:
+        logging.exception("Error while capturing certificate chain information")
 
     # If anything is wrong then https is not valid
     if (
@@ -1570,9 +1582,11 @@ def checkIfCertIsTrusted(endpoint, cert, store):
             logging.debug("  %s: Possible new intermediate cert not able to be verified.", endpoint.url)
     return False
 
+certchain_lock = threading.RLock()
 
 def checkCertChain(endpoint, certchain):
-    global CA_FILE, PT_INT_CA_FILE, STORE
+    global CA_FILE, PT_INT_CA_FILE, STORE, certchain_lock
+    certchain_lock.acquire()
     valid = None
     missingCert = None
     try: 
@@ -1635,12 +1649,13 @@ def checkCertChain(endpoint, certchain):
                     CA_FILE = new_certs_filename
                 if cert_type == "PT":
                     PT_INT_CA_FILE = new_certs_filename
-                STORE = "Custom"
+                STORE = "Supplied"
                 valid = True
                 missingCert = True
             logging.debug("  %s: Finished adding %s certs to %s trust store.", endpoint.url, len(certs_to_add), cert_type)
     except Exception as err:
         logging.debug("  %s: Error checking cert chain for missing intermediate certs: %s", endpoint.url, err)
+    certchain_lock.release()
     return (valid, missingCert)
 
 
@@ -2274,10 +2289,10 @@ def get_domain_status_code(domain):
 def get_domain_notes(domain):
     """Combine any notes for a domain."""
     all_notes = (
-        domain.http.notes + ";"
-        + domain.httpwww.notes + ";"
-        + domain.https.notes + ";"
-        + domain.httpswww.notes
+        "http: " + domain.http.notes + ";"
+        "httpwww: " + domain.httpwww.notes + ";"
+        "https: " + domain.https.notes + ";"
+        "httpswww: " + domain.httpswww.notes
     )
     all_notes = all_notes.replace(",", ";")
     return all_notes
@@ -2544,7 +2559,8 @@ def inspect_domains(domains, options):
         # By default, the store that we want to check is the Mozilla store
         # However, if a user wants to use their own CA bundle, check the
         # "Custom" Option from the sslyze output.
-        STORE = "Custom"
+        # sslyze changed "Custom" to "Supplied CA file"
+        STORE = "Supplied"
 
     if PT_INT_CA_FILE is None and options.get("pt_int_ca_file"):
         PT_INT_CA_FILE = options["pt_int_ca_file"]
